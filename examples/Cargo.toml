@@ -1,0 +1,24 @@
+[package]
+name = "rivun-examples"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rivun-core = { path = "../crates/rivun-core" }
+rivun-envelope = { path = "../crates/rivun-envelope" }
+rivun-crypto = { path = "../crates/rivun-crypto" }
+rivun-net = { path = "../crates/rivun-net" }
+rivun-node = { path = "../crates/rivun-node" }
+rivun-memory = { path = "../crates/rivun-memory" }
+rivun-store = { path = "../crates/rivun-store" }
+rivun-runtime = { path = "../crates/rivun-runtime" }
+rivun-driver-sdk = { path = "../crates/rivun-driver-sdk" }
+rivun-capability = { path = "../crates/rivun-capability" }
+tokio = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tempfile = { workspace = true }

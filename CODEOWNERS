@@ -1,0 +1,35 @@
+# rivun CODEOWNERS
+#
+# Replace these team handles if the GitHub organization uses different names.
+# Keep protocol, crypto, release, and governance paths owned separately from
+# general application code so risky changes get explicit review.
+
+* @Hakille-ai/Rivun-maintainers
+
+# Protocol, crypto, policy, fixtures, and governance-sensitive surfaces.
+/crates/@@@@rivun_HEADER@@WIRE@@/ @Hakille-ai/Rivun-protocol @Hakille-ai/Rivun-security
+/crates/rivun-envelope/ @Hakille-ai/Rivun-protocol @Hakille-ai/Rivun-security
+/crates/rivun-crypto/ @Hakille-ai/Rivun-security
+/crates/rivun-policy/ @Hakille-ai/Rivun-security @Hakille-ai/Rivun-maintainers
+/crates/rivun-agent/ @Hakille-ai/Rivun-protocol @Hakille-ai/Rivun-maintainers
+/fixtures/ @Hakille-ai/Rivun-protocol @Hakille-ai/Rivun-security
+# Runtime, node, operations, and deployment.
+/crates/rivun-node/ @Hakille-ai/Rivun-runtime @Hakille-ai/Rivun-security
+/crates/rivun-runtime/ @Hakille-ai/Rivun-runtime @Hakille-ai/Rivun-security
+/crates/rivun-ops/ @Hakille-ai/Rivun-runtime @Hakille-ai/Rivun-security
+
+# CLI, SDKs, website, and examples.
+/crates/rivun-cli/ @Hakille-ai/Rivun-maintainers
+/sdks/ @Hakille-ai/Rivun-sdk
+/website/ @Hakille-ai/Rivun-docs
+/docs/ @Hakille-ai/Rivun-docs @Hakille-ai/Rivun-maintainers
+/examples/domain-packs/ @Hakille-ai/Rivun-domain-packs @Hakille-ai/Rivun-security
+/docs/security.md @Hakille-ai/Rivun-security
+/docs/rfc-process.md @Hakille-ai/Rivun-protocol @Hakille-ai/Rivun-security
+/docs/operations.md @Hakille-ai/Rivun-runtime
+/docs/deployment.md @Hakille-ai/Rivun-runtime
+
+# CI, release, dependency, and contribution process.
+/.github/ @Hakille-ai/Rivun-maintainers @Hakille-ai/Rivun-security
+/CODEOWNERS @Hakille-ai/Rivun-maintainers
+
