@@ -1,27 +1,32 @@
 # Observability
 
-This runbook defines the production telemetry contract for ZAP nodes. The
+This runbook defines the production telemetry contract for rivun nodes. The
 runtime can evolve, but production deployments should keep the same operator
 signals: scrapeability, node health, driver execution, peer trust, registry
 integrity, receipt verification, capability cache freshness, and PoA failures.
 
-Reference assets live under `crates/zap-ops/config`:
+Reference assets live under `crates/rivun-ops/config`:
 
-- `observability/production.toml`: typed ZAP ops contract validated by
-  `zap-ops`;
-- `prometheus/zap-scrape.yml`: example Prometheus scrape job;
-- `prometheus/zap-rules.yml`: alert rules and runbook links;
+- `observability/production.toml`: typed rivun ops contract validated by
+  `rivun-ops`;
+- `prometheus/rivun-scrape.yml`: example Prometheus scrape job;
+- `prometheus/rivun-rules.yml`: alert rules and runbook links;
 - `otel/collector.yml`: OpenTelemetry Collector pipeline;
-- `grafana/zap-production-dashboard.json`: dashboard import.
+- `grafana/rivun-production-dashboard.json`: dashboard import.
+
+The `rivun-telemetry` crate implements the runtime side: `FleetDoctor` checks,
+`IncidentCapturer` snapshots, `PrometheusExporter` rendering, and
+`FleetTopology`. See [Telemetry](telemetry.md) for its surface; this document
+defines the stable operator contract those features must satisfy.
 
 ## Required Labels
 
 Every metric and span should include:
 
-- `service.name`: `zap-node`;
+- `service.name`: `rivun-node`;
 - `deployment.environment`: `production`, `staging`, or `development`;
 - `cluster`: stable cluster name;
-- `node_id`: local ZAP node id when the signal is node-specific;
+- `node_id`: local rivun node id when the signal is node-specific;
 - `peer`: peer node id when the signal describes a remote peer;
 - `action`: envelope subject or driver action when dispatching work.
 
@@ -30,36 +35,78 @@ contents must not be exported as labels or span attributes.
 
 ## Metrics Contract
 
-Recommended metric names:
+Metrics emitted by `ZapNode::metrics_prometheus_text()`:
 
-- `zap_node_health_status`: gauge where `0=healthy`, `1=degraded`,
-  `2=critical`;
-- `zap_frames_sent_total`, `zap_frames_received_total`,
-  `zap_frames_rejected_total`;
-- `zap_driver_execution_seconds_bucket` and
-  `zap_driver_execution_errors_total`;
-- `zap_peer_trust_status`: gauge by peer and status;
-- `zap_registry_signature_valid`: gauge, `1` only when local registry signature
+- `@@rivun_HEADER@@frames_sent_total`, `@@rivun_HEADER@@frames_received_total`,
+  `@@rivun_HEADER@@frames_rejected_total`: counters labelled by `node_id` and peer or
+  rejection reason;
+- `@@rivun_HEADER@@driver_execution_errors_total`: counter labelled by `node_id` and
+  `action`;
+- `@@rivun_HEADER@@peer_trust_status`: gauge by peer and status;
+- `@@rivun_HEADER@@registry_signature_valid`: gauge, `1` only when local registry signature
   verification succeeds;
-- `zap_receipt_log_verify_failures_total`;
-- `zap_capability_cache_age_seconds`;
-- `zap_poa_attestation_failures_total`.
+- `@@rivun_HEADER@@receipt_log_verify_failures_total`;
+- `@@rivun_HEADER@@capability_cache_age_seconds`;
+- `@@rivun_HEADER@@poa_attestation_failures_total`.
 
 Keep high-cardinality values out of labels. Use logs or receipts for request
 ids, install plan hashes, and detailed rejection reasons.
 
+Alert routing should preserve the incident class as a low-cardinality label,
+for example `policy_default_allow`, `registry_signature_invalid`,
+`capability_cache_stale`, `receipt_verification_failure`,
+`poa_attestation_failure`, `driver_runtime_errors`, or `replay_spike`. Use the
+incident id in logs and receipt metadata rather than metric labels.
+
+Prometheus `up{job="rivun-node"}` is the scrapeability signal used by the
+production rules. Driver latency histograms are not emitted yet; use driver
+error rate and receipt/PoA failures for production paging.
+
+Additional counters collected by `rivun-telemetry` include replay rejections and
+drops, journal rotations, segment manifest errors, pack verification failures,
+and gateway requests (`ZapNodeMetricsSnapshot`). Keep the contract above as
+the deployment-facing stability boundary.
+
+`rivun-node` exposes this contract as an in-process readiness surface through
+`ZapNode::metrics_snapshot()`, `ZapNode::metrics_prometheus_text()`,
+`ZapNode::health_snapshot()`, `ZapNode::health_json()`, and
+`ZapNode::healthz_text()`. When `[observability].http_bind` is configured,
+`rivun run` also starts a small HTTP listener with:
+
+- `GET /metrics`: Prometheus text from `metrics_prometheus_text()`.
+- `GET /healthz`: text health status from `healthz_text()`.
+- `GET /healthz.json`: JSON health snapshot from `health_json()`.
+
+`/healthz` and `/healthz.json` return HTTP `503` only when the node status is
+`critical`; `healthy` and `degraded` return `200` so operators can page on the
+named checks while keeping the process discoverable. Embedding services can
+still mount the same in-process text/JSON output behind their existing sidecar
+or supervisor and apply the bind/path policy from
+`crates/rivun-ops/config/observability/production.toml`.
+
 ## Health Checks
 
-Use `crates/zap-ops/config/observability/production.toml` as the canonical
+Use `crates/rivun-ops/config/observability/production.toml` as the canonical
 shape. The minimum production set is:
 
 - UDP bind or listener reachability;
-- receipt log path mounted and writable by the daemon user;
+- receipt journal directory mounted and writable by the daemon user;
 - registry bundle manifest present when `[registry.bundle_path]` is configured;
-- `zap doctor --strict --json` for config readiness.
+- `rivun doctor --strict --json` for config readiness.
 
 Health reports should be stale after 60 seconds unless the deployment uses a
 slower control loop.
+
+`ZapNode::health_snapshot()` returns `healthy`, `degraded`, or `critical` plus
+named checks for endpoint bind status, registry signature validity, registry
+bundle loadability, receipt journal verification, capability cache freshness,
+message policy posture, peer trust, and runtime error counters. `critical`
+means the node has lost a trust or audit invariant, such as invalid registry
+signature, invalid receipt journal, unreadable required capability cache, revoked
+peer, or PoA attestation failures. `degraded` means traffic can continue while
+operators investigate weaker posture, such as default-allow message policy,
+missing receipt journal configuration, quarantined peers, stale capability cache, or
+nonzero runtime rejection/driver error counters.
 
 ## Alerts
 
@@ -70,51 +117,53 @@ the metrics bind address. If the daemon is healthy but metrics are unavailable,
 treat this as an observability incident and keep traffic changes frozen until
 scraping is restored.
 
-### ZapHealthCritical
-
-At least one critical health check is failing. Run:
-
-```bash
-cargo run -p zap-cli -- doctor --config /etc/zap/zap.toml --strict --json
-```
-
-Then verify key files, receipt paths, registry signature policy, and capability
-cache freshness.
-
 ### ZapReceiptAuditFailing
 
-Receipt verification failed. Stop pruning receipt logs and archive the current
-files before restarting the node:
+Receipt verification failed. Stop compacting receipt journals and archive the
+current directories before restarting the node:
 
 ```bash
-cargo run -p zap-cli -- receipts verify --path /var/lib/zap/receipts.jsonl
+cargo run -p rivun-cli -- receipts verify --dir /var/lib/rivun/receipts
 ```
 
-If verification fails after a host or disk incident, preserve the broken log for
-forensics and cut over to a new receipt file only after security review.
+If verification fails after a host or disk incident, preserve the broken journal
+for forensics and cut over to a new receipt directory only after security
+review.
+
+Rollback only to a deployment whose receipt journal verifies for the full audit
+window. Preserve local and pulled peer receipts as described in
+[Operations](operations.md#receipt-verification-failure).
 
 ### ZapRegistrySignatureInvalid
 
-The local ZapStore registry is missing a valid operator signature. Pulling or
+The local RivunStore registry is missing a valid operator signature. Pulling or
 mirroring a registry clears trust until it is reviewed and re-signed:
 
 ```bash
-cargo run -p zap-cli -- registry verify-signature --registry /var/lib/zap/registry.index.toml
+cargo run -p rivun-cli -- registry verify-signature --registry /var/lib/rivun/registry.index.toml
 ```
 
 Do not install new drivers from an unsigned production registry.
+
+Rollback to the last signed registry/publication/bundle set that verifies, and
+preserve the invalid index. See
+[Operations](operations.md#registry-signature-invalid).
 
 ### ZapCapabilityCacheStale
 
 The capability cache is older than the deployment policy. Refresh and verify it:
 
 ```bash
-cargo run -p zap-cli -- capability cache refresh --config /etc/zap/zap.toml --strict --json
-cargo run -p zap-cli -- capability cache verify --path /var/lib/zap/capabilities.jsonl
+cargo run -p rivun-cli -- capability cache refresh --config /etc/rivun/rivun.toml --strict --json
+cargo run -p rivun-cli -- capability cache verify --path /var/lib/rivun/capabilities.jsonl
 ```
 
 Routes with `requires_peer_grant` should remain blocked until the cache is
 fresh.
+
+Rollback route changes when the refreshed cache no longer grants the required
+capability. Preserve stale and refreshed JSONL caches as described in
+[Operations](operations.md#stale-capability-cache).
 
 ### ZapDriverErrorRateHigh
 
@@ -122,8 +171,47 @@ Driver failures are elevated. Compare recent release changes, registry bundle
 hashes, and runtime limits. If only one action is affected, quarantine that
 driver version through registry deprecation or revocation.
 
+Rollback to the last manifest and registry entry that verify and have successful
+receipts under the same runtime limits. See
+[Operations](operations.md#driver-runtime-errors).
+
+### ZapFrameRejectRateHigh
+
+Inbound frame rejections are elevated by reason. Start with peer trust,
+configuration drift, signature failures, and schema/policy changes before
+assuming transport loss:
+
+```bash
+cargo run -p rivun-cli -- trust inspect --config /etc/rivun/rivun.toml --json
+cargo run -p rivun-cli -- check-config --config /etc/rivun/rivun.toml --json
+```
+
+Preserve sender and receiver logs plus any receipt entries covering the same
+window. If the reason points at replay, nonce, freshness, or stale-frame
+validation, follow the replay spike runbook below.
+
 ### ZapPoaAttestationFailures
 
 Validators are failing to attest or responses do not verify. Check validator
 set epoch, peer trust status, clock skew, and network reachability before
 retrying critical actions.
+
+Do not lower the effective threshold as an emergency shortcut. Use the last
+signed validator set that verifies, and preserve PoA request/response JSON as
+described in [Operations](operations.md#poa-attestation-failure).
+
+### ZapReplaySpike
+
+Replay or nonce-related frame rejections are rising. First verify local config
+and peer trust:
+
+```bash
+cargo run -p rivun-cli -- doctor --config /etc/rivun/rivun.toml --strict --json
+cargo run -p rivun-cli -- trust inspect --config /etc/rivun/rivun.toml --json
+cargo run -p rivun-cli -- check-config --config /etc/rivun/rivun.toml --json
+```
+
+Freeze peer key rotation and topology changes until the spike is explained.
+Preserve sender and receiver logs, then follow
+[Operations](operations.md#replay-spikes).
+

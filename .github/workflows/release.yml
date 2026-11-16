@@ -32,7 +32,7 @@ jobs:
     name: lint release workflow
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install actionlint
         shell: bash
         run: |
@@ -49,7 +49,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       channel: ${{ steps.version.outputs.channel }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - id: version
         shell: bash
@@ -62,7 +62,7 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
             channel="stable"
           fi
-          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | python -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "zap-cli"))')"
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | python -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "rivun-cli"))')"
           if [[ "$version" != "$cargo_version" ]]; then
             echo "release version $version does not match workspace version $cargo_version" >&2
             exit 1
@@ -75,9 +75,36 @@ jobs:
             exit 1
           fi
 
+  release-readiness:
+    name: release readiness
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            sdks/typescript/package-lock.json
+            website/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.23"
+          cache-dependency-path: sdks/go/go.mod
+      - name: Run release-readiness checklist
+        run: cargo run --locked -p xtask -- release readiness --require-go
+
   package:
     name: package ${{ matrix.target }}
-    needs: validate-version
+    needs:
+      - validate-version
+      - release-readiness
     strategy:
       fail-fast: false
       matrix:
@@ -93,7 +120,7 @@ jobs:
             archive_ext: zip
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -101,18 +128,18 @@ jobs:
       - run: cargo ci-fmt
       - run: cargo ci-test
       - run: cargo ci-clippy
-      - run: cargo build --locked --release -p zap-cli --target ${{ matrix.target }}
+      - run: cargo build --locked --release -p rivun-cli --target ${{ matrix.target }}
       - name: Build archive
         shell: bash
         run: |
           set -euo pipefail
           version="${{ needs.validate-version.outputs.version }}"
           target="${{ matrix.target }}"
-          package="zap-${version}-${target}"
+          package="rivun-${version}-${target}"
           mkdir -p "dist/${package}"
-          bin="zap"
+          bin="rivun"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            bin="zap.exe"
+            bin="rivun.exe"
           fi
           cp "target/${target}/release/${bin}" "dist/${package}/"
           cp README.md LICENSE NOTICE "dist/${package}/"
@@ -164,13 +191,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo run --locked -p zap-ops --bin zap-release-manifest -- \
+          cargo run --locked -p rivun-ops --bin rivun-release-manifest -- \
             --version "$VERSION" \
             --channel "$CHANNEL" \
             --git-sha "$GITHUB_SHA" \
-            --out dist/zap-release-manifest.json \
+            --out dist/rivun-release-manifest.json \
             dist/*.tar.gz dist/*.zip
-          cargo run --locked -p zap-ops --bin zap-release-manifest -- --check dist/zap-release-manifest.json
+          cargo run --locked -p rivun-ops --bin rivun-release-manifest -- --check dist/rivun-release-manifest.json
         env:
           VERSION: ${{ needs.validate-version.outputs.version }}
           CHANNEL: ${{ needs.validate-version.outputs.channel }}
@@ -188,5 +215,5 @@ jobs:
           set -euo pipefail
           version="${{ needs.validate-version.outputs.version }}"
           gh release create "v${version}" dist/* \
-            --title "ZAP v${version}" \
+            --title "Rivun v${version}" \
             --notes-file docs/release.md

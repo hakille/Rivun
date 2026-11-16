@@ -1,9 +1,9 @@
-# ZAP Go SDK
+# Rivun Go SDK
 
-Go helpers for ZAP `ZENV` control envelopes, local UDP requests, and ZapStore
+Go helpers for Rivun `ZENV` control envelopes, local UDP requests, and RivunStore
 registry payloads.
 
-The SDK prepares bytes and JSON that can be handed to any ZAP transport, and it
+The SDK prepares bytes and JSON that can be handed to any Rivun transport, and it
 includes `UDPClient` for loopback/dev peer integration.
 
 ## Build a registry bundle manifest request
@@ -14,11 +14,11 @@ package main
 import (
 	"fmt"
 
-	zap "github.com/zap-protocol/zap-sdk-go"
+	rivun "github.com/rivun-protocol/rivun-sdk-go"
 )
 
 func main() {
-	frame, err := zap.RegistryBundleManifestRequestFrame(true, true)
+	frame, err := rivun.RegistryBundleManifestRequestFrame(true, true)
 	if err != nil {
 		panic(err)
 	}
@@ -39,8 +39,27 @@ func main() {
 `VerifyEd25519Signature` verifies base64/base64-no-pad Ed25519 signatures with
 Go's standard `crypto/ed25519` package.
 
+## Shared fixtures and conformance
+
+The Go tests read the shared protocol fixtures from the repository-level
+`fixtures/` directory. They currently assert:
+
+- `ZENV-control-registry-bundle-manifest-request.json` matches the Go RivunStore
+  request helper and round-trips through `ControlFrame`.
+- `control-subjects-v1.json` includes the Go registry subjects and expected
+  media types.
+
+To add a fixture, create a small deterministic JSON file in `fixtures/`, then
+add or extend a test in `sdks/go/protocol_test.go` that loads it with
+`loadRootFixture` and checks the schema version, subject, media type, and body
+fields that define the contract.
+
 ## Test
 
 ```bash
 go test ./sdks/go/...
 ```
+
+This command requires a local Go toolchain. CI installs Go before running the
+SDK workflow; local machines without `go` installed cannot execute these tests.
+

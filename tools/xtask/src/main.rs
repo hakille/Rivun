@@ -13,74 +13,74 @@ const DEFAULT_CRITERION_DIR: &str = "target/criterion";
 const NEW_BASELINE_DIR: &str = "new";
 const BENCH_TARGETS: &[BenchTarget] = &[
     BenchTarget {
-        package: "zap-capability",
+        package: "rivun-capability",
         bench: "capability",
-        path: "crates/zap-capability/benches/capability.rs",
+        path: "crates/rivun-capability/benches/capability.rs",
     },
     BenchTarget {
-        package: "zap-core",
+        package: "rivun-core",
         bench: "protocol",
-        path: "crates/zap-core/benches/protocol.rs",
+        path: "crates/rivun-core/benches/protocol.rs",
     },
     BenchTarget {
-        package: "zap-crypto",
+        package: "rivun-crypto",
         bench: "signature",
-        path: "crates/zap-crypto/benches/signature.rs",
+        path: "crates/rivun-crypto/benches/signature.rs",
     },
     BenchTarget {
-        package: "zap-driver-sdk",
+        package: "rivun-driver-sdk",
         bench: "sdk",
-        path: "crates/zap-driver-sdk/benches/sdk.rs",
+        path: "crates/rivun-driver-sdk/benches/sdk.rs",
     },
     BenchTarget {
-        package: "zap-envelope",
+        package: "rivun-envelope",
         bench: "envelope",
-        path: "crates/zap-envelope/benches/envelope.rs",
+        path: "crates/rivun-envelope/benches/envelope.rs",
     },
     BenchTarget {
-        package: "zap-ledger",
+        package: "rivun-ledger",
         bench: "receipt",
-        path: "crates/zap-ledger/benches/receipt.rs",
+        path: "crates/rivun-ledger/benches/receipt.rs",
     },
     BenchTarget {
-        package: "zap-memory",
+        package: "rivun-memory",
         bench: "memory",
-        path: "crates/zap-memory/benches/memory.rs",
+        path: "crates/rivun-memory/benches/memory.rs",
     },
     BenchTarget {
-        package: "zap-net",
+        package: "rivun-net",
         bench: "round_trip",
-        path: "crates/zap-net/benches/round_trip.rs",
+        path: "crates/rivun-net/benches/round_trip.rs",
     },
     BenchTarget {
-        package: "zap-node",
+        package: "rivun-node",
         bench: "dispatch",
-        path: "crates/zap-node/benches/dispatch.rs",
+        path: "crates/rivun-node/benches/dispatch.rs",
     },
     BenchTarget {
-        package: "zap-policy",
+        package: "rivun-policy",
         bench: "policy",
-        path: "crates/zap-policy/benches/policy.rs",
+        path: "crates/rivun-policy/benches/policy.rs",
     },
     BenchTarget {
-        package: "zap-router",
+        package: "rivun-router",
         bench: "router",
-        path: "crates/zap-router/benches/router.rs",
+        path: "crates/rivun-router/benches/router.rs",
     },
     BenchTarget {
-        package: "zap-runtime",
+        package: "rivun-runtime",
         bench: "runtime",
-        path: "crates/zap-runtime/benches/runtime.rs",
+        path: "crates/rivun-runtime/benches/runtime.rs",
     },
     BenchTarget {
-        package: "zap-schema",
+        package: "rivun-schema",
         bench: "schema",
-        path: "crates/zap-schema/benches/schema.rs",
+        path: "crates/rivun-schema/benches/schema.rs",
     },
     BenchTarget {
-        package: "zap-store",
+        package: "rivun-store",
         bench: "store",
-        path: "crates/zap-store/benches/store.rs",
+        path: "crates/rivun-store/benches/store.rs",
     },
 ];
 
@@ -99,6 +99,7 @@ fn main() -> Result<()> {
         (Some("bench"), Some("collect")) => bench_collect(CollectOptions::parse(args)?),
         (Some("bench"), Some("compare")) => bench_compare(CompareOptions::parse(args)?),
         (Some("bench"), Some("site")) => bench_site(SiteOptions::parse(args)?),
+        (Some("release"), Some("readiness")) => release_readiness(ReadinessOptions::parse(args)?),
         _ => {
             bail!("{}", usage());
         }
@@ -114,7 +115,8 @@ fn usage() -> &'static str {
      run: [--sample-size <n>] [--warm-up-time <sec>] [--measurement-time <sec>] [--only <package/bench>]\n\
      collect: --out <path> [--input <criterion-dir>] [--label <label>] [--source-sha <sha>]\n\
      compare: --base <path> --head <path> --thresholds <path> [--out <markdown>]\n\
-     site: --current <path> --out <dir> [--history-in <path>]"
+     site: --current <path> --out <dir> [--history-in <path>]\n\
+     release readiness: [--skip-website] [--skip-sdks] [--require-go]"
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +256,34 @@ impl SiteOptions {
     }
 }
 
+#[derive(Debug)]
+struct ReadinessOptions {
+    skip_website: bool,
+    skip_sdks: bool,
+    require_go: bool,
+}
+
+impl ReadinessOptions {
+    fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
+        let mut skip_website = false;
+        let mut skip_sdks = false;
+        let mut require_go = false;
+        for arg in args {
+            match arg.as_str() {
+                "--skip-website" => skip_website = true,
+                "--skip-sdks" => skip_sdks = true,
+                "--require-go" => require_go = true,
+                other => bail!("unknown release readiness option `{other}`"),
+            }
+        }
+        Ok(Self {
+            skip_website,
+            skip_sdks,
+            require_go,
+        })
+    }
+}
+
 fn next_value(
     args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
     option: &str,
@@ -267,6 +297,151 @@ fn next_path(
     option: &str,
 ) -> Result<PathBuf> {
     Ok(PathBuf::from(next_value(args, option)?))
+}
+
+fn release_readiness(options: ReadinessOptions) -> Result<()> {
+    println!("running release readiness checks");
+    run_step(
+        "protocol fixtures",
+        ".",
+        "cargo",
+        &[
+            "run",
+            "--locked",
+            "-p",
+            "rivun-cli",
+            "--",
+            "fixtures",
+            "verify",
+            "--fixtures",
+            "fixtures",
+            "--json",
+        ],
+        &[],
+    )?;
+    run_step(
+        "domain pack catalog",
+        ".",
+        "cargo",
+        &[
+            "run",
+            "--locked",
+            "-p",
+            "rivun-cli",
+            "--",
+            "pack",
+            "list",
+            "--root",
+            "examples/domain-packs",
+            "--json",
+        ],
+        &[],
+    )?;
+
+    if options.skip_sdks {
+        println!("skipping SDK conformance checks");
+    } else {
+        run_step(
+            "python SDK conformance",
+            ".",
+            "python",
+            &["-m", "unittest", "discover", "-s", "sdks/python/tests"],
+            &[("PYTHONPATH", "sdks/python/src")],
+        )?;
+        run_step(
+            "typescript SDK install",
+            "sdks/typescript",
+            "npm",
+            &["ci"],
+            &[],
+        )?;
+        run_step(
+            "typescript SDK typecheck",
+            "sdks/typescript",
+            "npm",
+            &["run", "typecheck"],
+            &[],
+        )?;
+        run_step(
+            "typescript SDK tests",
+            "sdks/typescript",
+            "npm",
+            &["test"],
+            &[],
+        )?;
+        run_step(
+            "rust SDK conformance",
+            "sdks/rust",
+            "cargo",
+            &["test", "--locked"],
+            &[],
+        )?;
+        if command_available("go") {
+            run_step(
+                "go SDK conformance",
+                "sdks/go",
+                "go",
+                &["test", "./..."],
+                &[],
+            )?;
+        } else if options.require_go {
+            bail!("go is required for release readiness but was not found in PATH");
+        } else {
+            println!("warning: go not found; skipped Go SDK conformance");
+        }
+    }
+
+    if options.skip_website {
+        println!("skipping website lint");
+    } else {
+        run_step("website install", "website", "npm", &["ci"], &[])?;
+        run_step("website lint", "website", "npm", &["run", "lint"], &[])?;
+    }
+
+    println!("release readiness checks completed");
+    Ok(())
+}
+
+fn run_step(
+    label: &str,
+    cwd: &str,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<()> {
+    println!("==> {label}");
+    let mut command = Command::new(platform_program(program));
+    command.args(args).current_dir(cwd);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("failed to launch release readiness step `{label}`"))?;
+    if !status.success() {
+        bail!("release readiness step `{label}` failed with status {status}");
+    }
+    Ok(())
+}
+
+fn command_available(program: &str) -> bool {
+    let version_arg = if program == "go" {
+        "version"
+    } else {
+        "--version"
+    };
+    Command::new(platform_program(program))
+        .arg(version_arg)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn platform_program(program: &str) -> String {
+    if cfg!(windows) && matches!(program, "npm" | "npx") {
+        format!("{program}.cmd")
+    } else {
+        program.to_string()
+    }
 }
 
 fn bench_run(options: RunOptions) -> Result<()> {
@@ -439,7 +614,7 @@ fn bench_compare(options: CompareOptions) -> Result<()> {
         .collect();
     let mut regressions = Vec::new();
     let mut lines = vec![
-        "# ZAP benchmark comparison".to_string(),
+        "# Rivun benchmark comparison".to_string(),
         String::new(),
         "| benchmark | base median | head median | delta | threshold | status |".to_string(),
         "| --- | ---: | ---: | ---: | ---: | --- |".to_string(),
@@ -662,7 +837,8 @@ fn threshold_for<'a>(config: &'a ThresholdConfig, id: &str) -> &'a Threshold {
     config
         .benchmark
         .iter()
-        .find(|entry| id.contains(&entry.pattern))
+        .filter(|entry| id.contains(&entry.pattern))
+        .max_by_key(|entry| entry.pattern.len())
         .map(|entry| &entry.threshold)
         .unwrap_or(&config.default)
 }
@@ -697,7 +873,7 @@ fn render_site(latest: &BenchmarkReport, history: &BenchmarkHistory) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ZAP Benchmarks</title>
+  <title>Rivun Benchmarks</title>
   <style>
     :root {{ color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }}
     body {{ margin: 0; padding: 32px; background: Canvas; color: CanvasText; }}
@@ -712,7 +888,7 @@ fn render_site(latest: &BenchmarkReport, history: &BenchmarkHistory) -> String {
 </head>
 <body>
 <main>
-  <h1>ZAP Benchmarks</h1>
+  <h1>Rivun Benchmarks</h1>
   <p>Latest run: <code>{label}</code> at epoch <code>{generated}</code>. Stored runs: {runs}.</p>
   <p><a href="./latest.json">latest.json</a> · <a href="./history.json">history.json</a> · <a href="./badge.svg">badge.svg</a></p>
   <table>
@@ -779,4 +955,39 @@ fn write_text(path: &Path, text: &str) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn threshold(relative_regression: f64, min_absolute_ns: f64) -> Threshold {
+        Threshold {
+            relative_regression,
+            min_absolute_ns,
+            blocking: true,
+        }
+    }
+
+    #[test]
+    fn threshold_matching_prefers_most_specific_pattern() {
+        let config = ThresholdConfig {
+            default: threshold(0.10, 100.0),
+            benchmark: vec![
+                BenchmarkThreshold {
+                    pattern: "zenv".to_string(),
+                    threshold: threshold(0.07, 1.0),
+                },
+                BenchmarkThreshold {
+                    pattern: "node_dispatch".to_string(),
+                    threshold: threshold(0.15, 5000.0),
+                },
+            ],
+        };
+
+        let selected = threshold_for(&config, "node_dispatch_zenv_action");
+
+        assert_eq!(selected.relative_regression, 0.15);
+        assert_eq!(selected.min_absolute_ns, 5000.0);
+    }
 }
