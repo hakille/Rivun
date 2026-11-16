@@ -11,8 +11,10 @@ import {
   RECEIPT_REPLICATION_CONTENT_TYPE,
   RECEIPT_REPLICATION_RESPONSE_SUBJECT,
   RECEIPT_SIGNATURE_DOMAIN,
-  ZapStoreClient,
-  ZapUdpClient,
+  RivunEnvelope,
+  RivunMessageKind,
+  RivunStoreClient,
+  RivunUdpClient,
   artifactHash,
   registryBundleManifestRequestFrame,
   receiptBodyHash,
@@ -22,14 +24,14 @@ import {
   validateReceiptResponseShape,
   validateReceiptShape,
   validateRegistryBundleManifestResponse,
-  zapDomainMessage,
+  rivunDomainMessage,
 } from "../src/index.ts";
 import type { DriverRegistryEntry, RegistryInstallPlanEntry, RegistryInstallPlanRequest } from "../src/index.ts";
 
 const HASH = `blake3:${"0".repeat(64)}`;
 
 test("registry bundle manifest control frame round trips", () => {
-  const frame = new ZapStoreClient().registryBundleManifestRequest({ requirePublication: true, requireDrivers: true });
+  const frame = new RivunStoreClient().registryBundleManifestRequest({ requirePublication: true, requireDrivers: true });
   const encoded = frame.encode();
   const decoded = ControlFrame.decode(encoded);
 
@@ -91,8 +93,8 @@ test("receipt crypto helpers validate shape and build exact messages", () => {
     receipt_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
     node_id: "11111111-1111-4111-8111-111111111111",
     frame_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-    subject: "zap.registry.index.request",
-    content_type: "application/zap-registry-index+json",
+    subject: "rivun.registry.index.request",
+    content_type: "application/rivun-registry-index+json",
     body_hash: HASH,
     policy_decision: "allow",
     outcome: "accepted",
@@ -113,12 +115,12 @@ test("receipt crypto helpers validate shape and build exact messages", () => {
   assert.equal(message.startsWith(`${RECEIPT_SIGNATURE_DOMAIN}{"receipt":`), true);
   assert.match(message, /"signer_node_id":"11111111-1111-4111-8111-111111111111"/);
   assert.doesNotMatch(message, /"signature"/);
-  assert.deepEqual(zapDomainMessage("ZAP-TEST-v1", Buffer.from("payload")), Buffer.from("ZAP-TEST-v1\0payload"));
+  assert.deepEqual(rivunDomainMessage("rivun-TEST-v1", Buffer.from("payload")), Buffer.from("rivun-TEST-v1\0payload"));
   assert.match(receiptBodyHash(Buffer.from("receipt-body")), /^blake3:[0-9a-f]{64}$/);
-  assert.equal(RECEIPT_REPLICATION_RESPONSE_SUBJECT, "zap.receipts.response");
-  assert.equal(RECEIPT_REPLICATION_CONTENT_TYPE, "application/zap-receipts+json");
-  assert.equal(AGENT_INTENT_SUBJECT, "zap.agent.intent");
-  assert.equal(AGENT_CONTENT_TYPE, "application/zap-agent+json");
+  assert.equal(RECEIPT_REPLICATION_RESPONSE_SUBJECT, "rivun.receipts.response");
+  assert.equal(RECEIPT_REPLICATION_CONTENT_TYPE, "application/rivun-receipts+json");
+  assert.equal(AGENT_INTENT_SUBJECT, "rivun.agent.intent");
+  assert.equal(AGENT_CONTENT_TYPE, "application/rivun-agent+json");
 });
 
 test("install plan types carry ABI requirements and migrations", () => {
@@ -171,7 +173,7 @@ test("UDP client sends and receives control envelopes", async () => {
     server.send(message, remote.port, remote.address);
   });
 
-  const client = new ZapUdpClient();
+  const client = new RivunUdpClient();
   await client.bind();
   const response = await client.requestControl(
     registryBundleManifestRequestFrame({ requireDrivers: true }),
@@ -182,4 +184,27 @@ test("UDP client sends and receives control envelopes", async () => {
 
   assert.equal(response.subject, REGISTRY_BUNDLE_MANIFEST_REQUEST_SUBJECT);
   assert.equal((response.jsonBody() as { require_drivers: boolean }).require_drivers, true);
+});
+
+test("envelope decode rejects invalid UTF-8 and invalid UUIDs", () => {
+  const envelope = new RivunEnvelope({
+    kind: RivunMessageKind.control,
+    subject: "rivun.test",
+    contentType: "application/json",
+    body: "{}",
+  });
+  const encoded = Buffer.from(envelope.encode());
+  encoded[74] = 0xff;
+
+  assert.throws(() => RivunEnvelope.decode(encoded), /invalid UTF-8 in subject/);
+  assert.throws(
+    () =>
+      new RivunEnvelope({
+        kind: RivunMessageKind.control,
+        subject: "rivun.test",
+        contentType: "application/json",
+        id: "not-a-uuid",
+      }).encode(),
+    /invalid UUID/,
+  );
 });

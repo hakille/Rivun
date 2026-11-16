@@ -1,4 +1,4 @@
-package zap
+package rivun
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestRegistryBundleManifestControlFrameRoundTrips(t *testing.T) {
-	frame, err := (ZapStoreClient{}).RegistryBundleManifestRequest(true, true)
+	frame, err := (RivunStoreClient{}).RegistryBundleManifestRequest(true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,13 +47,33 @@ func TestRegistryBundleManifestControlFrameRoundTrips(t *testing.T) {
 	}
 }
 
+func TestEnvelopeRejectsInvalidUTF8(t *testing.T) {
+	if _, err := NewEnvelope(KindControl, string([]byte{0xff}), "application/json", nil); err == nil {
+		t.Fatal("expected invalid UTF-8 subject to be rejected")
+	}
+
+	env, err := NewEnvelope(KindControl, "rivun.test", "application/json", []byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := env.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded[EnvelopeHeaderLen] = 0xff
+
+	if _, err := DecodeEnvelope(encoded); err == nil || !strings.Contains(err.Error(), "invalid UTF-8 in subject") {
+		t.Fatalf("DecodeEnvelope error = %v", err)
+	}
+}
+
 func TestRegistryBundleManifestRequestFixtureMatchesSDK(t *testing.T) {
 	var fixture struct {
 		Envelope struct {
-			KindName    string `json:"kind_name"`
-			KindValue   uint16 `json:"kind_value"`
-			Subject     string `json:"subject"`
-			ContentType string `json:"content_type"`
+			KindName    string                        `json:"kind_name"`
+			KindValue   uint16                        `json:"kind_value"`
+			Subject     string                        `json:"subject"`
+			ContentType string                        `json:"content_type"`
 			BodyJSON    RegistryBundleManifestRequest `json:"body_json"`
 		} `json:"envelope"`
 	}
@@ -117,6 +137,7 @@ func TestControlSubjectFixtureContainsSDKRegistrySubjects(t *testing.T) {
 		RegistryIndexResponseSubject:  RegistryIndexContentType,
 		BundleManifestRequestSubject:  RegistryBundleContentType,
 		BundleManifestResponseSubject: RegistryBundleContentType,
+		PactBundleSubject:             PactContentType,
 	}
 	for subject, contentType := range expected {
 		if subjects[subject] != contentType {
@@ -200,44 +221,27 @@ func TestUnsignedControlFrameFixtureRoundTripsWithoutSecurityTrailers(t *testing
 
 func TestReceiptSampleFixtureHasStableResponseShape(t *testing.T) {
 	var fixture struct {
-		FixtureSchemaVersion uint8  `json:"fixture_schema_version"`
-		Subject              string `json:"subject"`
-		ContentType          string `json:"content_type"`
-		BodyJSON             struct {
-			SchemaVersion uint8  `json:"schema_version"`
-			RequestID     UUID   `json:"request_id"`
-			Truncated     bool   `json:"truncated"`
-			Receipts      []struct {
-				SchemaVersion        uint8                  `json:"schema_version"`
-				ReceiptID            UUID                   `json:"receipt_id"`
-				NodeID               UUID                   `json:"node_id"`
-				FrameID              UUID                   `json:"frame_id"`
-				Subject              string                 `json:"subject"`
-				ContentType          string                 `json:"content_type"`
-				BodyHash             string                 `json:"body_hash"`
-				PolicyDecision       string                 `json:"policy_decision"`
-				Outcome              string                 `json:"outcome"`
-				StartedAtUnixMicros  uint64                 `json:"started_at_unix_micros"`
-				FinishedAtUnixMicros uint64                 `json:"finished_at_unix_micros"`
-				Metadata             map[string]interface{} `json:"metadata"`
-				SignerPublicKey      string                 `json:"signer_public_key"`
-				Signature            string                 `json:"signature"`
-			} `json:"receipts"`
-		} `json:"body_json"`
+		FixtureSchemaVersion uint8                          `json:"fixture_schema_version"`
+		Subject              string                         `json:"subject"`
+		ContentType          string                         `json:"content_type"`
+		BodyJSON             ReceiptReplicationResponseBody `json:"body_json"`
 	}
 	loadRootFixture(t, filepath.Join("protocol", "receipt-sample-v1.json"), &fixture)
 
-	if fixture.FixtureSchemaVersion != 1 || fixture.BodyJSON.SchemaVersion != 1 {
+	if fixture.FixtureSchemaVersion != 1 || fixture.BodyJSON.SchemaVersion != ReceiptReplicationSchemaVersion {
 		t.Fatalf("fixture schema mismatch: %+v", fixture)
 	}
-	if fixture.Subject != "zap.receipts.response" || fixture.ContentType != "application/zap-receipts+json" {
+	if fixture.Subject != ReceiptReplicationResponseSubject || fixture.ContentType != ReceiptReplicationContentType {
 		t.Fatalf("receipt fixture route mismatch: %s %s", fixture.Subject, fixture.ContentType)
+	}
+	if err := ValidateReceiptResponseShape(fixture.BodyJSON); err != nil {
+		t.Fatalf("receipt response validation failed: %v", err)
 	}
 	if fixture.BodyJSON.Truncated || len(fixture.BodyJSON.Receipts) != 1 {
 		t.Fatalf("receipt collection mismatch: %+v", fixture.BodyJSON)
 	}
 	receipt := fixture.BodyJSON.Receipts[0]
-	if receipt.SchemaVersion != 1 || receipt.Subject != RegistryIndexRequestSubject || receipt.ContentType != RegistryIndexContentType {
+	if receipt.SchemaVersion != ReceiptSchemaVersion || receipt.Subject != RegistryIndexRequestSubject || receipt.ContentType != RegistryIndexContentType {
 		t.Fatalf("receipt protocol fields mismatch: %+v", receipt)
 	}
 	if receipt.PolicyDecision != "allow" || receipt.Outcome != "accepted" {
@@ -248,6 +252,101 @@ func TestReceiptSampleFixtureHasStableResponseShape(t *testing.T) {
 	}
 	if receipt.FinishedAtUnixMicros < receipt.StartedAtUnixMicros {
 		t.Fatalf("receipt timestamps inverted: %+v", receipt)
+	}
+}
+
+func TestPactFixturesReproduceHashAndVerify(t *testing.T) {
+	var record struct {
+		Subject     string  `json:"subject"`
+		ContentType string  `json:"content_type"`
+		BodyJSON    RivunPact `json:"body_json"`
+	}
+	var bundle struct {
+		Subject     string        `json:"subject"`
+		ContentType string        `json:"content_type"`
+		BodyJSON    RivunPactBundle `json:"body_json"`
+	}
+	loadRootFixture(t, "pact-record-v1.json", &record)
+	loadRootFixture(t, "pact-bundle-v1.json", &bundle)
+
+	if record.Subject != PactRecordSubject || record.ContentType != PactContentType {
+		t.Fatalf("PACT record fixture route mismatch: %s %s", record.Subject, record.ContentType)
+	}
+	hash, err := PactHash(record.BodyJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash != record.BodyJSON.Hash {
+		t.Fatalf("hash = %s, want %s", hash, record.BodyJSON.Hash)
+	}
+	now := uint64(1893457000000000)
+	ok, err := VerifyPact(record.BodyJSON, &now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected PACT record to verify")
+	}
+	if bundle.Subject != PactBundleSubject || bundle.ContentType != PactContentType {
+		t.Fatalf("PACT bundle fixture route mismatch: %s %s", bundle.Subject, bundle.ContentType)
+	}
+	ok, err = VerifyPactBundle(bundle.BodyJSON, &now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected PACT bundle to verify")
+	}
+}
+
+func TestSecurityProtocolFixturesCoverSignedPoaCapabilityAndDatagramShapes(t *testing.T) {
+	var signed struct {
+		Security struct {
+			Signed      bool `json:"signed"`
+			AuthTrailer struct {
+				Algorithm string `json:"algorithm"`
+			} `json:"auth_trailer"`
+		} `json:"security"`
+	}
+	var poa struct {
+		Security struct {
+			Signed     bool `json:"signed"`
+			POATrailer struct {
+				Threshold uint16 `json:"threshold"`
+			} `json:"poa_trailer"`
+		} `json:"security"`
+	}
+	var capability struct {
+		Subject     string `json:"subject"`
+		ContentType string `json:"content_type"`
+		BodyJSON    struct {
+			Capabilities []string `json:"capabilities"`
+		} `json:"body_json"`
+	}
+	var datagram struct {
+		Cipher   string `json:"cipher"`
+		NonceHex string `json:"nonce_hex"`
+	}
+
+	loadRootFixture(t, filepath.Join("protocol", "signed-control-frame-v1.json"), &signed)
+	loadRootFixture(t, filepath.Join("protocol", "poa-control-frame-v1.json"), &poa)
+	loadRootFixture(t, filepath.Join("protocol", "capability-response-v1.json"), &capability)
+	loadRootFixture(t, filepath.Join("protocol", "encrypted-datagram-v1.json"), &datagram)
+
+	if !signed.Security.Signed || signed.Security.AuthTrailer.Algorithm != "ed25519" {
+		t.Fatalf("signed fixture mismatch: %+v", signed.Security)
+	}
+	if !poa.Security.Signed || poa.Security.POATrailer.Threshold != 1 {
+		t.Fatalf("poa fixture mismatch: %+v", poa.Security)
+	}
+	if capability.Subject != "rivun.capability.response" || capability.ContentType != "application/rivun-capability+json" {
+		t.Fatalf("capability fixture route mismatch: %+v", capability)
+	}
+	if !containsString(capability.BodyJSON.Capabilities, "driver.execute:echo") {
+		t.Fatalf("capability fixture missing driver capability: %+v", capability.BodyJSON.Capabilities)
+	}
+	if datagram.Cipher != "ChaCha20-Poly1305" || len(datagram.NonceHex) != 24 {
+		t.Fatalf("datagram fixture mismatch: %+v", datagram)
 	}
 }
 
@@ -374,7 +473,7 @@ func TestUDPClientSendsControlEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	frame, err := (ZapStoreClient{}).RegistryBundleManifestRequest(false, true)
+	frame, err := (RivunStoreClient{}).RegistryBundleManifestRequest(false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,4 +499,13 @@ func loadRootFixture(t *testing.T, name string, out any) {
 	if err := json.Unmarshal(raw, out); err != nil {
 		t.Fatalf("parse fixture %s: %v", name, err)
 	}
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
