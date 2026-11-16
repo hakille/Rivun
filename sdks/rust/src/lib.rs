@@ -1,7 +1,7 @@
-//! External ZAP SDK helpers.
+//! External Rivun SDK helpers.
 //!
 //! This crate keeps a small, application-friendly surface around the canonical
-//! ZAP crates. It is intentionally network-free: callers can build and parse
+//! Rivun crates. It is intentionally network-free: callers can build and parse
 //! `ZENV` control payloads, then hand the bytes to their chosen transport.
 
 use bytes::Bytes;
@@ -9,16 +9,22 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{error::Error, fmt};
 use uuid::Uuid;
 
-pub use zap_core::{
+pub use rivun_core::{
     AUTH_TRAILER_LEN, AuthTrailer, ED25519_SIGNATURE_LEN, HEADER_LEN as WIRE_HEADER_LEN,
-    MAX_PAYLOAD_LEN, PoaAttestation, PoaTrailer, SIGNING_PREFIX_LEN, SignatureAlgorithm, ZapFlags,
-    ZapFrame, ZapHeader, now_micros,
+    MAX_PAYLOAD_LEN, PoaAttestation, PoaTrailer, SIGNING_PREFIX_LEN, SignatureAlgorithm, RivunFlags,
+    RivunFrame, RivunHeader, now_micros,
 };
-pub use zap_envelope::{
-    DEFAULT_CONTENT_TYPE, HEADER_LEN as ENVELOPE_HEADER_LEN, ZapEnvelope, ZapEnvelopeRef,
-    ZapMessageKind,
+pub use rivun_envelope::{
+    DEFAULT_CONTENT_TYPE, HEADER_LEN as ENVELOPE_HEADER_LEN, RivunEnvelope, RivunEnvelopeRef,
+    RivunMessageKind,
 };
-pub use zap_store::{
+pub use rivun_pact::{
+    PACT_BUNDLE_SUBJECT, PACT_CONTENT_TYPE, PACT_RECORD_SUBJECT, PACT_REVOKE_SUBJECT,
+    PACT_SCHEMA_VERSION, PACT_VERIFY_SUBJECT, RivunPact, RivunPactBundle, RivunPactProof,
+    RivunPactRevocation, RivunPactStatus, RivunPactVerification,
+};
+pub use rivun_ledger::{ReceiptJournalStore, SignedActionReceipt};
+pub use rivun_store::{
     DRIVER_ABI_VERSION, DRIVER_HASH_PREFIX, DriverAbiRequirement, DriverManifest, DriverRegistry,
     DriverRegistryEntry, DriverRegistryMigration, DriverRegistryStatus,
     REGISTRY_BUNDLE_MANIFEST_CONTENT_TYPE, REGISTRY_BUNDLE_MANIFEST_REQUEST_SUBJECT,
@@ -34,9 +40,10 @@ pub type Result<T> = std::result::Result<T, SdkError>;
 
 #[derive(Debug)]
 pub enum SdkError {
-    Envelope(zap_envelope::ZapEnvelopeError),
+    Envelope(rivun_envelope::RivunEnvelopeError),
     Json(serde_json::Error),
-    ExpectedControl { actual: ZapMessageKind },
+    Io(std::io::Error),
+    ExpectedControl { actual: RivunMessageKind },
 }
 
 impl fmt::Display for SdkError {
@@ -44,6 +51,7 @@ impl fmt::Display for SdkError {
         match self {
             Self::Envelope(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
+            Self::Io(error) => write!(f, "{error}"),
             Self::ExpectedControl { actual } => {
                 write!(f, "expected control envelope, got {}", actual.as_str())
             }
@@ -56,13 +64,14 @@ impl Error for SdkError {
         match self {
             Self::Envelope(error) => Some(error),
             Self::Json(error) => Some(error),
+            Self::Io(error) => Some(error),
             Self::ExpectedControl { .. } => None,
         }
     }
 }
 
-impl From<zap_envelope::ZapEnvelopeError> for SdkError {
-    fn from(value: zap_envelope::ZapEnvelopeError) -> Self {
+impl From<rivun_envelope::RivunEnvelopeError> for SdkError {
+    fn from(value: rivun_envelope::RivunEnvelopeError) -> Self {
         Self::Envelope(value)
     }
 }
@@ -75,13 +84,13 @@ impl From<serde_json::Error> for SdkError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlFrame {
-    envelope: ZapEnvelope,
+    envelope: RivunEnvelope,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct ZapStoreClient;
+pub struct RivunStoreClient;
 
-impl ZapStoreClient {
+impl RivunStoreClient {
     pub fn registry_index_request(&self, require_signature: bool) -> Result<ControlFrame> {
         registry_index_request_frame(require_signature)
     }
@@ -102,7 +111,7 @@ impl ControlFrame {
         body: impl Into<Bytes>,
     ) -> Result<Self> {
         let envelope =
-            ZapEnvelope::new(ZapMessageKind::Control, subject, content_type, body.into())?;
+            RivunEnvelope::new(RivunMessageKind::Control, subject, content_type, body.into())?;
         Ok(Self { envelope })
     }
 
@@ -119,13 +128,13 @@ impl ControlFrame {
     }
 
     pub fn decode(input: &[u8]) -> Result<Self> {
-        let envelope = ZapEnvelopeRef::parse(input)?;
-        if envelope.kind() != ZapMessageKind::Control {
+        let envelope = RivunEnvelopeRef::parse(input)?;
+        if envelope.kind() != RivunMessageKind::Control {
             return Err(SdkError::ExpectedControl {
                 actual: envelope.kind(),
             });
         }
-        let owned = ZapEnvelope::new(
+        let owned = RivunEnvelope::new(
             envelope.kind(),
             envelope.subject(),
             envelope.content_type(),
@@ -168,7 +177,7 @@ impl ControlFrame {
         Ok(serde_json::from_slice(self.body())?)
     }
 
-    pub fn into_envelope(self) -> ZapEnvelope {
+    pub fn into_envelope(self) -> RivunEnvelope {
         self.envelope
     }
 }
@@ -213,8 +222,78 @@ pub fn decode_registry_bundle_manifest_response(
     Ok(serde_json::from_slice(frame.body())?)
 }
 
-pub fn verify_registry_signature(registry: &DriverRegistry) -> zap_store::Result<()> {
+pub fn verify_registry_signature(registry: &DriverRegistry) -> rivun_store::Result<()> {
     registry.verify_signature()
+}
+
+#[derive(Debug)]
+pub struct RivunUdpClient {
+    socket: std::net::UdpSocket,
+}
+
+impl RivunUdpClient {
+    pub fn bind(addr: impl std::net::ToSocketAddrs) -> Result<Self> {
+        let socket = std::net::UdpSocket::bind(addr).map_err(SdkError::Io)?;
+        Ok(Self { socket })
+    }
+
+    pub fn send_envelope(
+        &self,
+        envelope: &RivunEnvelope,
+        target: impl std::net::ToSocketAddrs,
+    ) -> Result<usize> {
+        let bytes = envelope.encode();
+        self.socket
+            .send_to(&bytes, target)
+            .map_err(SdkError::Io)
+    }
+
+    pub fn send_control(
+        &self,
+        frame: &ControlFrame,
+        target: impl std::net::ToSocketAddrs,
+    ) -> Result<usize> {
+        let bytes = frame.encode();
+        self.socket
+            .send_to(&bytes, target)
+            .map_err(SdkError::Io)
+    }
+
+    pub fn recv_envelope(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(RivunEnvelope, std::net::SocketAddr)> {
+        self.socket.set_read_timeout(timeout).ok();
+        let mut buf = [0u8; 65535];
+        let (n, addr) = self.socket.recv_from(&mut buf).map_err(SdkError::Io)?;
+        let env_ref = RivunEnvelopeRef::parse(&buf[..n])?;
+        let owned = RivunEnvelope::new(
+            env_ref.kind(),
+            env_ref.subject(),
+            env_ref.content_type(),
+            Bytes::copy_from_slice(env_ref.body()),
+        )?
+        .with_id(env_ref.id())
+        .with_metadata(Bytes::copy_from_slice(env_ref.metadata()))?;
+        Ok((owned, addr))
+    }
+
+    pub fn request_control(
+        &self,
+        frame: &ControlFrame,
+        target: impl std::net::ToSocketAddrs,
+        timeout: std::time::Duration,
+    ) -> Result<ControlFrame> {
+        self.send_control(frame, target)?;
+        let (env, _) = self.recv_envelope(Some(timeout))?;
+        if env.kind() != RivunMessageKind::Control {
+            return Err(SdkError::ExpectedControl {
+                actual: env.kind(),
+            });
+        }
+        let encoded = env.encode();
+        ControlFrame::decode(&encoded)
+    }
 }
 
 #[cfg(test)]
@@ -225,7 +304,7 @@ mod tests {
 
     #[test]
     fn registry_bundle_manifest_request_control_frame_round_trips() {
-        let frame = ZapStoreClient
+        let frame = RivunStoreClient
             .registry_bundle_manifest_request(true, true)
             .unwrap();
         let encoded = frame.encode();
@@ -275,10 +354,63 @@ mod tests {
     }
 
     #[test]
-    fn artifact_hash_uses_canonical_zap_store_blake3() {
+    fn artifact_hash_uses_canonical_rivun_store_blake3() {
         assert_eq!(
             artifact_hash(b"driver"),
             "blake3:bb6f2f5117d7690122f64d2950ca874cd26fbe808e2e28dc9b914ebd22d7800b"
         );
+    }
+
+    #[test]
+    fn protocol_security_fixtures_are_readable_by_rust_sdk_tests() {
+        let signed: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/protocol/signed-control-frame-v1.json"))
+                .unwrap();
+        let poa: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/protocol/poa-control-frame-v1.json"))
+                .unwrap();
+        let capability: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/protocol/capability-response-v1.json"
+        ))
+        .unwrap();
+        let datagram: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/protocol/encrypted-datagram-v1.json"
+        ))
+        .unwrap();
+
+        assert_eq!(signed["security"]["signed"], true);
+        assert_eq!(signed["security"]["auth_trailer"]["algorithm"], "ed25519");
+        assert_eq!(poa["security"]["poa_trailer"]["threshold"], 1);
+        assert_eq!(capability["subject"], "zap.capability.response");
+        assert_eq!(datagram["cipher"], "ChaCha20-Poly1305");
+        assert_eq!(datagram["nonce_hex"].as_str().unwrap().len(), 24);
+    }
+
+    #[test]
+    fn pact_fixture_verifies_with_rust_sdk() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/pact-record-v1.json")).unwrap();
+        assert_eq!(fixture["subject"], PACT_RECORD_SUBJECT);
+        assert_eq!(fixture["content_type"], PACT_CONTENT_TYPE);
+        let pact: RivunPact = serde_json::from_value(fixture["body_json"].clone()).unwrap();
+        let verification = pact.verify(None).unwrap();
+        assert!(verification.valid);
+        assert_eq!(verification.hash, pact.hash.unwrap());
+    }
+
+    #[test]
+    fn udp_client_send_and_receive_envelope() {
+        let server = RivunUdpClient::bind("127.0.0.1:0").unwrap();
+        let server_addr = server.socket.local_addr().unwrap();
+        let client = RivunUdpClient::bind("127.0.0.1:0").unwrap();
+
+        let frame = ControlFrame::new("zap.test.ping", "text/plain", Bytes::from_static(b"ping")).unwrap();
+        let bytes_sent = client.send_control(&frame, server_addr).unwrap();
+        assert!(bytes_sent > 0);
+
+        let (recv_env, from_addr) = server.recv_envelope(Some(std::time::Duration::from_millis(500))).unwrap();
+        assert_eq!(recv_env.subject(), "zap.test.ping");
+        assert_eq!(recv_env.body(), b"ping");
+        assert_eq!(from_addr, client.socket.local_addr().unwrap());
     }
 }
